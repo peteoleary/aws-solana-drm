@@ -20,7 +20,8 @@ use std::{
     fs::File,
     io::Write,
     time::{Duration, SystemTime, UNIX_EPOCH},
-    println
+    println,
+    str::FromStr
 };
 
 
@@ -52,6 +53,34 @@ struct AuthorizeBody {
     request_length: Duration
 }
 
+// NFT data structures version 1 from metaplex-program-library/token-metadata/program/src/state.rs
+
+#[derive(Deserialize, Serialize)]
+pub struct Creator {
+    pub address: Pubkey,
+    pub verified: bool,
+    // In percentages, NOT basis points ;) Watch out!
+    pub share: u8,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct Data {
+    /// The name of the asset
+    pub name: String,
+    /// The symbol for the asset
+    pub symbol: String,
+    /// URI pointing to JSON representing the asset
+    pub uri: String,
+    /// Royalty basis points that goes to creators in secondary sales (0-10000)
+    pub seller_fee_basis_points: u16,
+    /// Array of creators, optional
+    pub creators: Option<Vec<Creator>>,
+}
+
+fn get_license_program_id() -> Pubkey {
+    return Pubkey::from_str("Cb5q9Kd6P7xHtg6dJecEqJmHqXtGRQ25TLkziwSx3AhE").unwrap();
+}
+
 #[post("/authorize", data = "<authorize_body>")]
 fn authorize(authorize_body: Json<AuthorizeBody>) -> OkResponse {  
 
@@ -65,7 +94,14 @@ fn authorize(authorize_body: Json<AuthorizeBody>) -> OkResponse {
 
     let raw_account_data_result = rpc.get_account_data(&authorize_body.asset_contract_location);
 
-    let account_data: Result<LicenseAccount, _> = bincode::deserialize(&raw_account_data_result.unwrap());
+    let account_data: LicenseAccount = bincode::deserialize(&raw_account_data_result.unwrap()).unwrap();
+
+    println!("account_data.licensor_pubkey={}", account_data.licensor_pubkey);
+
+    let contract_address = Pubkey::create_with_seed(&authorize_body.asset_contract_location, "license", &get_license_program_id())
+            .expect("Cannot get contract address");
+
+    assert_eq!("Dnh4fDeYTGYDTwKDKAJ4etAdZbh7vEz1M47RbgCByfGy", contract_address.to_string());
 
     // make sure assets requested are part of NFT
     // see if requestor has access for requested time period
@@ -90,13 +126,14 @@ mod test {
         fs::File,
         io::Write,
         time::{Duration, SystemTime, UNIX_EPOCH},
+        str::FromStr
     };
 
     use super::rocket;
     use rocket::http::Status;
     use rocket::local::blocking::Client;
 
-    use crate::{AuthorizeBody};
+    use crate::{AuthorizeBody, get_license_program_id};
 
     use solana_sdk::{
         clock::UnixTimestamp,
@@ -128,10 +165,9 @@ mod test {
     fn test_authorize() {
         let client = get_rocket_client();
 
-        let program_id = read_keypair_file(get_key_file_path("target/deploy/license-keypair.json"))
-            .expect("Cannot read program_id file");
+        let program_id = get_license_program_id();
 
-        assert_eq!("Cb5q9Kd6P7xHtg6dJecEqJmHqXtGRQ25TLkziwSx3AhE", program_id.pubkey().to_string());
+        assert_eq!("Cb5q9Kd6P7xHtg6dJecEqJmHqXtGRQ25TLkziwSx3AhE", program_id.to_string());
 
         // TODO: read key files
         // make contract location
@@ -139,22 +175,16 @@ mod test {
         let licensee = read_keypair_file(get_key_file_path("js/keys/licensee.json"))
             .expect("Cannot read licesee file");
 
-        let nft_address = read_keypair_file(get_key_file_path("js/keys/nft_account.json"))
-            .expect("Cannot read nft address file");
+        let nft_address_string = std::fs::read_to_string(get_key_file_path("js/keys/devnet_nft_account.pub.txt"))
+            .expect("Could not read NFT address file");
 
-        println!("nft_address.pubkey={}", nft_address.pubkey().to_string());
+        println!("nft_address.pubkey={}", nft_address_string);
 
-        assert_eq!("CSDntK83NvpqTyndxmyi85QPeSxFuf5muzeuCafnyaUG", nft_address.pubkey().to_string());
-
-        let contract_address = Pubkey::create_with_seed(&nft_address.pubkey(), "license", &program_id.pubkey())
-            .expect("Cannot get contract address");
-
-        assert_eq!("Dnh4fDeYTGYDTwKDKAJ4etAdZbh7vEz1M47RbgCByfGy", contract_address.to_string());
-
+        let nft_address = Pubkey::from_str(&nft_address_string).expect("Could not parse NFT address");
 
         let body = AuthorizeBody {
             asset_requested: "http://www.foo.bar".to_string(),
-            asset_contract_location: contract_address,
+            asset_contract_location: nft_address,
             licensee: licensee.pubkey(),
             request_length: Duration::new(1000, 0)
         };
